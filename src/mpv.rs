@@ -14,16 +14,31 @@ use std::time::{Duration, Instant};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(2);
 
-pub(crate) fn build_loadfile(path: &Path, start: Option<f64>) -> Vec<String> {
+pub(crate) fn build_loadfile(modern: bool, path: &Path, start: Option<f64>) -> Vec<Value> {
     let mut command = vec![
-        "loadfile".to_string(),
-        path.to_string_lossy().into_owned(),
-        "replace".to_string(),
+        Value::from("loadfile"),
+        Value::from(path.to_string_lossy().into_owned()),
+        Value::from("replace"),
     ];
     if let Some(start) = start {
-        command.push(format!("start=+{start}"));
+        if modern {
+            command.push(Value::from(-1)); // insert index, ignored by "replace", but must be an int since mpv 0.38
+        }
+        command.push(Value::from(format!("start=+{start}")));
     }
     command
+}
+
+/// mpv >= 0.38 has an extra `index` argument in loadfile before per-file options.
+/// shortcut: unparseable version strings are assumed modern; verified only against mpv 0.39
+pub(crate) fn parse_modern_version(version: &str) -> bool {
+    version
+        .split_whitespace()
+        .nth(1)
+        .and_then(|v| v.split('.').nth(1))
+        .and_then(|minor| minor.parse::<u32>().ok())
+        .map(|minor| minor >= 38)
+        .unwrap_or(true)
 }
 
 pub(crate) fn parse_event(line: &str) -> Option<PlayerEvent> {
@@ -68,6 +83,7 @@ pub struct Mpv {
     writer: Stream,
     pending: Pending,
     events: Option<Receiver<PlayerEvent>>,
+    modern_loadfile: bool,
 }
 
 impl Mpv {
@@ -91,7 +107,17 @@ impl Mpv {
         let reader_pending = Arc::clone(&pending);
         std::thread::spawn(move || reader_loop(stream, reader_pending, event_tx));
 
-        Ok(Mpv { child, writer, pending, events: Some(event_rx) })
+        let mut mpv =
+            Mpv { child, writer, pending, events: Some(event_rx), modern_loadfile: true };
+        let version_str = mpv
+            .rpc(json!(["get_property", "mpv-version"]))
+            .ok()
+            .and_then(|value| value.as_str().map(|s| s.to_string()));
+        mpv.modern_loadfile = version_str
+            .as_deref()
+            .map(parse_modern_version)
+            .unwrap_or(true);
+        Ok(mpv)
     }
 
     /// Hand out the event receiver once; std mpsc receivers are not cloneable.
@@ -123,7 +149,7 @@ impl Mpv {
 
 impl Player for Mpv {
     fn load_file(&mut self, path: &Path, start: Option<f64>) -> Result<()> {
-        let command: Vec<Value> = build_loadfile(path, start).into_iter().map(Value::String).collect();
+        let command = build_loadfile(self.modern_loadfile, path, start);
         self.rpc(Value::Array(command))?;
         Ok(())
     }
@@ -196,23 +222,46 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn build_loadfile_with_start() {
-        let cmd = build_loadfile(Path::new("e1.mkv"), Some(12.5));
+    fn build_loadfile_with_start_modern() {
+        // mpv >= 0.38: index arg (ignored by "replace") before per-file options
+        let cmd = build_loadfile(true, Path::new("e1.mkv"), Some(12.5));
         assert_eq!(
             cmd,
             vec![
-                "loadfile".to_string(),
-                "e1.mkv".to_string(),
-                "replace".to_string(),
-                "start=+12.5".to_string(),
+                json!("loadfile"),
+                json!("e1.mkv"),
+                json!("replace"),
+                json!(-1),
+                json!("start=+12.5"),
             ]
         );
     }
 
     #[test]
+    fn build_loadfile_with_start_legacy() {
+        // mpv < 0.38 (e.g. RPi OS bookworm apt 0.35): options are the 4th arg
+        let cmd = build_loadfile(false, Path::new("e1.mkv"), Some(12.5));
+        assert_eq!(
+            cmd,
+            vec![json!("loadfile"), json!("e1.mkv"), json!("replace"), json!("start=+12.5")]
+        );
+    }
+
+    #[test]
     fn build_loadfile_without_start() {
-        let cmd = build_loadfile(Path::new("e1.mkv"), None);
-        assert_eq!(cmd, vec!["loadfile", "e1.mkv", "replace"]);
+        // no start → 3 args, valid on every mpv version
+        let cmd = build_loadfile(true, Path::new("e1.mkv"), None);
+        assert_eq!(cmd, vec![json!("loadfile"), json!("e1.mkv"), json!("replace")]);
+        let cmd = build_loadfile(false, Path::new("e1.mkv"), None);
+        assert_eq!(cmd, vec![json!("loadfile"), json!("e1.mkv"), json!("replace")]);
+    }
+
+    #[test]
+    fn parse_modern_version_test() {
+        assert!(parse_modern_version("mpv 0.39.0 (C:\\build\\mpv)"));
+        assert!(parse_modern_version("mpv 0.38.0"));
+        assert!(!parse_modern_version("mpv 0.35.1"));
+        assert!(parse_modern_version("weird string")); // unparseable → assume modern
     }
 
     #[test]
