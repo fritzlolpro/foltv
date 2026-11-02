@@ -434,7 +434,7 @@ mod tests {
     #[test]
     fn idle_errors_are_swallowed() {
         // leaving a channel while position() fails: no entry, no panic
-        let (dir, config) = setup();
+        let (_dir, config) = setup();
         let mut engine = Engine::new(config, default_state());
         let mut player = MockPlayer::new(0.0);
         player.position_fails = true;

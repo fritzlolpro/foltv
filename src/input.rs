@@ -18,19 +18,19 @@ pub fn key_to_command(key: KeyEvent) -> Option<Command> {
     }
 }
 
-pub fn read_commands(tx: std::sync::mpsc::Sender<Command>) -> Result<()> {
+pub fn read_commands<F: FnMut(Command)>(mut on_key: F) -> Result<()> {
     terminal::enable_raw_mode()?;
-    let result = read_loop(&tx);
+    let result = read_loop(&mut on_key);
     let _ = terminal::disable_raw_mode();
     result
 }
 
-fn read_loop(tx: &std::sync::mpsc::Sender<Command>) -> Result<()> {
+fn read_loop<F: FnMut(Command)>(on_key: &mut F) -> Result<()> {
     loop {
         let Event::Key(key) = event::read()? else { continue };
         let Some(command) = key_to_command(key) else { continue };
         let quit = matches!(command, Command::Quit);
-        tx.send(command)?;
+        on_key(command);
         if quit {
             return Ok(());
         }
