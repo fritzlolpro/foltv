@@ -4,6 +4,7 @@ use crate::state::{ChannelState, State};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
+#[derive(PartialEq, Debug)]
 pub enum Command {
     Next,
     ChannelUp,
